@@ -1,6 +1,6 @@
 const express = require("express");
 const cors = require("cors");
-const OpenAIApi = require("openai"); // ✅ Fixed OpenAI import
+const OpenAIApi = require("openai");
 require("dotenv").config();
 
 // 🔹 Firebase Setup
@@ -13,6 +13,7 @@ admin.initializeApp({
 
 const db = admin.firestore();
 const chatCollection = db.collection("chats");
+const companyInfoCollection = db.collection("companyInfo"); // 🔹 Stores company-specific data
 
 const app = express();
 app.use(express.json());
@@ -23,41 +24,101 @@ const openai = new OpenAIApi({
   apiKey: process.env.OPENAI_API_KEY, // Uses your API key from .env file
 });
 
-// 🔹 Chat Endpoint (Handles Messages & Stores in Firebase)
+// 🔹 Get company information from Firebase
+const getCompanyInfo = async () => {
+  const doc = await companyInfoCollection.doc("default").get();
+  return doc.exists ? doc.data() : {};
+};
+
+// 🔹 Chat Endpoint (AI Now Asks Questions)
 app.post("/chat", async (req, res) => {
   try {
-    const { message, userId } = req.body;
+    const { userId, agentLevel = "Beginner", tone = "Friendly", language = "en" } = req.body;
 
-    if (!message || !userId) {
-      return res.status(400).json({ error: "Message and userId are required" });
+    if (!userId) {
+      return res.status(400).json({ error: "User ID is required" });
     }
 
     // Retrieve existing chat history from Firebase
     const userChatRef = chatCollection.doc(userId);
     const chatHistory = (await userChatRef.get()).data()?.messages || [];
 
-    // Store user message in chat history
-    chatHistory.push({ role: "user", content: message });
+    // Get company data
+    const companyInfo = await getCompanyInfo();
+    const companyDetails = companyInfo.details || "No specific details provided.";
 
-    // 🔹 Send Message to OpenAI
+    // 🔹 Adjust AI difficulty based on agent level
+    let complexityInstruction = "";
+    switch (agentLevel) {
+      case "Beginner":
+        complexityInstruction = "Keep the questions simple and straightforward.";
+        break;
+      case "Intermediate":
+        complexityInstruction = "Ask moderate difficulty questions, testing common problem-solving scenarios.";
+        break;
+      case "Advanced":
+        complexityInstruction = "Ask complex, tricky customer situations that require deep policy knowledge.";
+        break;
+      default:
+        complexityInstruction = "Keep it realistic and engaging.";
+    }
+
+    // 🔹 Adjust chatbot tone
+    let toneInstruction = "";
+    switch (tone) {
+      case "Friendly":
+        toneInstruction = "Be a warm and polite customer.";
+        break;
+      case "Professional":
+        toneInstruction = "Be a formal, business-like customer.";
+        break;
+      case "Casual":
+        toneInstruction = "Be a relaxed, everyday customer.";
+        break;
+      case "Not So Friendly":
+        toneInstruction = "Be a direct, difficult, and slightly impatient customer.";
+        break;
+      default:
+        toneInstruction = "Be a neutral customer.";
+    }
+
+    // 🔹 Generate AI question
     const response = await openai.chat.completions.create({
       model: "gpt-4",
-      messages: [{ role: "user", content: message }],
+      messages: [
+        { role: "system", content: `${toneInstruction} ${complexityInstruction} You are a customer asking about ${companyDetails}. Your goal is to ask a question that a customer service agent would need to answer. Speak as if you're the customer.` }
+      ],
       max_tokens: 100,
       temperature: 0.7,
     });
 
-    const botReply = response.choices[0].message.content.trim();
+    const aiQuestion = response.choices[0].message.content.trim();
 
-    // Store AI response in chat history
-    chatHistory.push({ role: "bot", content: botReply });
+    // Store AI question in chat history
+    chatHistory.push({ role: "bot", content: aiQuestion });
 
     // 🔹 Save Updated Chat History to Firebase
     await userChatRef.set({ messages: chatHistory });
 
-    res.json({ reply: botReply, chatHistory });
+    res.json({ question: aiQuestion, chatHistory });
   } catch (error) {
     console.error("Error:", error);
+    res.status(500).json({ error: "Something went wrong" });
+  }
+});
+
+// 🔹 Store Company Info (Admin can update this manually)
+app.post("/company-info", async (req, res) => {
+  try {
+    const { details } = req.body;
+    if (!details) {
+      return res.status(400).json({ error: "Company details are required" });
+    }
+    
+    await companyInfoCollection.doc("default").set({ details });
+    res.json({ message: "Company information updated successfully" });
+  } catch (error) {
+    console.error("Error updating company info:", error);
     res.status(500).json({ error: "Something went wrong" });
   }
 });
